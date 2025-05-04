@@ -1,0 +1,22 @@
+[project]
+name = "mcp-wx-chatinsight"
+version = "0.1.0"
+description = "MCP WX Insight Server"
+readme = "README.md"
+requires-python = ">=3.11"
+dependencies = [
+    "aiomysql>=0.2.0",
+    "fastmcp>=2.2.7",
+    "mcp[cli]>=1.7.1",
+]
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[tool.uv]
+dev-dependencies = ["pyright>=1.1.389"]
+
+[project.scripts]
+mcp-wx-chatinsight = "mcp_wx_chatinsight:main"
+
