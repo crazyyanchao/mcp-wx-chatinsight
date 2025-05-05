@@ -7,7 +7,7 @@
 MCP WX Insight Server is an MCP server for data analysis. It provides data interaction and business intelligence capabilities through MySQL. The server supports running SQL queries, analyzing business data, and automatically generating business insight memos. It supports both single-database and cross-database analysis modes. This is particularly useful when you need to analyze multiple tables with the same DDL (for example, when chat messages are stored across multiple databases and tables). This MCP server only requires read access for analysis, so write and delete operations are not within the scope of discussion. Please prepare your data in MySQL before using it.
 
 Key features include:
-- Support for single-database and cross-database analysis modes (cross-database requires consistent table structures)
+- Support for single-database and cross-database analysis modes (cross-database requires consistent table structures) (ensure database account has permission to execute `SHOW CREATE TABLE`)
 - Support for STDIO and SSE transport protocols (can be used with Postman for MCP protocol debugging)
 - Complete data validation and error handling
 - Support for debug logging
@@ -62,13 +62,13 @@ The server provides six core tools:
 ### SSE
 ```bash
 # Start command
-$env:MYSQL_HOST="localhost"; $env:MYSQL_PORT="3306"; $env:MYSQL_USER="root"; $env:MYSQL_PASSWORD="123456"; uv run mcp-wx-chatinsight --mode cross_db --db 'test1,test2' --table "wx_record" --transport "sse" --port 8000 --sse_path "/mcp-wx-chatinsight-cross/sse" --debug
+$env:MYSQL_HOST="localhost"; $env:MYSQL_PORT="3306"; $env:MYSQL_USER="root"; $env:MYSQL_PASSWORD="123456"; uv run mcp-wx-chatinsight --db 'test1,test2' --table "wx_record" --transport "sse" --port 8000 --sse_path "/mcp-wx-chatinsight/sse" --debug
 # Desktop configuration
 {
     "mcp-wx-chatinsight":
     {
         "type": "sse",
-        "command": "http://localhost:8000/mcp-wx-chatinsight-cross/sse"
+        "command": "http://localhost:8000/mcp-wx-chatinsight/sse"
     }
 }
 ```
@@ -85,8 +85,6 @@ $env:MYSQL_HOST="localhost"; $env:MYSQL_PORT="3306"; $env:MYSQL_USER="root"; $en
             "parent_of_servers_repo/.../mcp_wx_chatinsight",
             "run",
             "mcp-wx-chatinsight",
-            "--mode",
-            "cross_db", # cross_db for cross-database mode, single_db for single database query
             "--db",
             "test1,test2", # Database names, comma-separated in cross_db mode, single database name in single_db mode
             "--table",
@@ -113,7 +111,7 @@ $env:MYSQL_HOST="localhost"; $env:MYSQL_PORT="3306"; $env:MYSQL_USER="root"; $en
     "-y",
     "supergateway",
     "--sse",
-    "http://localhost:8000/mcp-wx-chatinsight-cross/sse"
+    "http://localhost:8000/mcp-wx-chatinsight/sse"
   ]
 }
 ```
@@ -132,7 +130,7 @@ $env:MYSQL_HOST="localhost"; $env:MYSQL_PORT="3306"; $env:MYSQL_USER="root"; $en
       "-v",
       "mcp-test:/mcp",
       "mcp/mcp-wx-chatinsight",
-      "--mode",
+      "--db",
       "..."
     ]
   }
@@ -163,13 +161,9 @@ uv run mcp-wx-chatinsight
 
 ### Testing
 ```bash
-$env:MYSQL_HOST="localhost"; $env:MYSQL_PORT="3306"; $env:MYSQL_USER="root"; $env:MYSQL_PASSWORD="123456"; uv run mcp-wx-chatinsight --mode single_db --db "test1" --table "wx_record" --debug
+$env:MYSQL_HOST="localhost"; $env:MYSQL_PORT="3306"; $env:MYSQL_USER="root"; $env:MYSQL_PASSWORD="123456"; uv run mcp-wx-chatinsight --db 'test1,test2' --table "wx_record" --debug
 
-$env:MYSQL_HOST="localhost"; $env:MYSQL_PORT="3306"; $env:MYSQL_USER="root"; $env:MYSQL_PASSWORD="123456"; uv run mcp-wx-chatinsight --mode single_db --db "test1" --table "wx_record" --transport "sse" --port 8000 --sse_path "/mcp-wx-chatinsight-single/sse" --debug # http://localhost:8000/mcp-wx-chatinsight-single/sse
-
-$env:MYSQL_HOST="localhost"; $env:MYSQL_PORT="3306"; $env:MYSQL_USER="root"; $env:MYSQL_PASSWORD="123456"; uv run mcp-wx-chatinsight --mode cross_db --db 'test1,test2' --table "wx_record" --debug
-
-$env:MYSQL_HOST="localhost"; $env:MYSQL_PORT="3306"; $env:MYSQL_USER="root"; $env:MYSQL_PASSWORD="123456"; uv run mcp-wx-chatinsight --mode cross_db --db 'test1,test2' --table "wx_record" --transport "sse" --port 8000 --sse_path "/mcp-wx-chatinsight-cross/sse" --debug # http://localhost:8000/mcp-wx-chatinsight-cross/sse
+$env:MYSQL_HOST="localhost"; $env:MYSQL_PORT="3306"; $env:MYSQL_USER="root"; $env:MYSQL_PASSWORD="123456"; uv run mcp-wx-chatinsight --db 'test1,test2' --table "wx_record" --transport "sse" --port 8000 --sse_path "/mcp-wx-chatinsight/sse" --debug # http://localhost:8000/mcp-wx-chatinsight/sse
 ```
 
 ### Package Publishing

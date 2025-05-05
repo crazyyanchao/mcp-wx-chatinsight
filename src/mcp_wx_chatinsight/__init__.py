@@ -11,7 +11,7 @@ from . import server
 import asyncio
 import argparse
 import json
-from typing import Union, List
+from typing import Union, List, Optional
 import sys
 import logging
 
@@ -23,46 +23,68 @@ def setup_debug_logging():
     )
     return logging.getLogger(__name__)
 
-def validate_db_names(db_names: Union[str, List[str]], mode: str, logger=None) -> Union[str, List[str]]:
-    """根据模式验证数据库名称。"""
-    if logger:
-        logger.debug(f"正在验证数据库名称: {db_names} 在模式: {mode}")
+def validate_table_name(table_name: str, logger=None) -> list[str]:
+    """验证表名并返回数据库名和表名。
     
-    if mode == 'cross_db':
-        if isinstance(db_names, str):
-            # 按逗号分割并去除空白
-            db_names = [name.strip() for name in db_names.split(',')]
-        elif isinstance(db_names, list):
-            db_names = [str(name).strip() for name in db_names]
-        else:
-            raise ValueError("在跨库模式下，--db 必须是逗号分隔的字符串或数据库名称列表")
+    Args:
+        table_name: 表名，'db.table' 格式，传入多个时请用英文逗号分隔，例如：test1.wx_record,test2.wx_record
+        logger: 可选的日志记录器
         
-        if not all(name for name in db_names):
-            raise ValueError("不允许空的数据库名称")
-        if len(db_names) < 2:
-            raise ValueError("跨库模式至少需要2个数据库名称")
-    else:  # 单库模式
-        if not isinstance(db_names, str):
-            raise ValueError("在单库模式下，--db 必须是单个数据库名称字符串")
-    
-    if logger:
-        logger.debug(f"验证成功。最终数据库名称: {db_names}")
-    return db_names
-
-def validate_table_name(table_name: str, logger=None) -> str:
-    """验证表名。"""
+    Returns:
+        list[str]: 验证后的表名列表，格式为 ['db.table', ...]
+        
+    Raises:
+        ValueError: 当表名格式无效时
+    """
     if logger:
         logger.debug(f"正在验证表名: {table_name}")
     
     if not isinstance(table_name, str):
-        raise ValueError("表名必须是字符串")
-    if not table_name.strip():
+        raise ValueError("表名必须是字符串类型")
+    
+    table_name = table_name.strip()
+    if not table_name:
         raise ValueError("表名不能为空")
     
-    result = table_name.strip()
+    # 分割多个表名
+    table_names = [name.strip() for name in table_name.split(',')]
+    if not table_names:
+        raise ValueError("至少需要提供一个表名")
+    
+    validated_tables = []
+    for full_table_name in table_names:
+        if not full_table_name:
+            raise ValueError("表名不能为空")
+            
+        # 处理可能的数据库名.表名格式
+        parts = full_table_name.split('.')
+        if len(parts) > 2:
+            raise ValueError(f"表名格式无效: {full_table_name}，应为 'db.table' 格式")
+        
+        # 验证表名格式
+        if len(parts) == 2:
+            db_name, table = parts
+            if not db_name.strip():
+                raise ValueError(f"数据库名不能为空: {full_table_name}")
+            if not table.strip():
+                raise ValueError(f"表名不能为空: {full_table_name}")
+            db_name = db_name.strip()
+            table = table.strip()
+            validated_name = f"{db_name}.{table}"
+        else:
+            table = full_table_name
+            validated_name = table
+        
+        # 验证表名字符
+        if not all(c.isalnum() or c in '_' for c in table):
+            raise ValueError(f"表名只能包含字母、数字和下划线: {table}")
+        
+        validated_tables.append(validated_name)
+    
     if logger:
-        logger.debug(f"验证成功。最终表名: {result}")
-    return result
+        logger.debug(f"验证成功。表名列表: {validated_tables}")
+    
+    return validated_tables
 
 def main():
     """包的主入口点。"""
@@ -72,25 +94,17 @@ def main():
     )
     
     parser.add_argument(
-        '--mode',
-        type=str,
-        choices=['cross_db', 'single_db'],
-        default='single_db',
-        help='数据库模式: cross_db (跨库) 或 single_db (不跨库)'
-    )
-    
-    parser.add_argument(
-        '--db',
-        type=str,
-        required=True,
-        help='数据库名称。在跨库模式下，以JSON数组形式提供 ["db1", "db2"]。在单库模式下，以字符串形式提供 "db1"'
-    )
-    
-    parser.add_argument(
         '--table',
         type=str,
         required=True,
-        help='要分析的表名（例如：wx_record）'
+        help='要分析的表名（例如：test.wx_record，传入多个时请用英文逗号分隔）'
+    )
+
+    parser.add_argument(
+        '--desc',
+        type=str,
+        default="",
+        help='要分析的表数据含义说明'
     )
 
     parser.add_argument(
@@ -128,13 +142,10 @@ def main():
         logger = setup_debug_logging() if args.debug else None
         if logger:
             logger.debug("已启用调试模式")
-            logger.debug(f"参数: mode={args.mode}, db={args.db}, table={args.table}, transport={args.transport}, port={args.port}, sse_path={args.sse_path}")
-        
-        # 根据模式验证数据库名称
-        db_names = validate_db_names(args.db, args.mode, logger)
+            logger.debug(f"参数: table={args.table}, transport={args.transport}, port={args.port}, sse_path={args.sse_path}")
         
         # 验证表名
-        table_name = validate_table_name(args.table, logger)
+        table_names = validate_table_name(args.table, logger)
         
         # 使用SSE模式时验证端口和sse_path
         if args.transport == 'sse':
@@ -147,9 +158,7 @@ def main():
         
         if logger:
             logger.debug("正在使用以下配置启动服务器:")
-            logger.debug(f"模式: {args.mode}")
-            logger.debug(f"数据库: {db_names}")
-            logger.debug(f"表: {table_name}")
+            logger.debug(f"表: {table_names}")
             logger.debug(f"传输: {args.transport}")
             if args.transport == 'sse':
                 logger.debug(f"端口: {args.port}")
@@ -157,9 +166,8 @@ def main():
         
         # 使用验证后的配置运行服务器
         asyncio.run(server.main(
-            mode=args.mode,
-            db_names=db_names,
-            table_name=table_name,
+            table_names=table_names,
+            desc=args.desc,
             transport=args.transport,
             port=args.port,
             sse_path=args.sse_path

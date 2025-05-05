@@ -19,6 +19,7 @@ import asyncio
 import pdb
 
 from mcp_wx_chatinsight.prompt import PROMPT_TEMPLATE
+from mcp_wx_chatinsight.report import report_generate
 
 # 重新配置 Windows 系统下的默认编码（从 windows-1252 改为 utf-8）
 if sys.platform == "win32" and os.environ.get('PYTHONIOENCODING') is None:
@@ -38,26 +39,27 @@ class DatabaseConfig:
         self.default_db = os.getenv('MYSQL_DATABASE', '')
 
 class DatabaseManager:
-    def __init__(self, config: DatabaseConfig):
+    def __init__(self, config: DatabaseConfig, table_names: List[str]):
         self.config = config
         self.pools: Dict[str, aiomysql.Pool] = {}
         self.insights: list[str] = []
+        self.table_names = table_names
+        self.ddl_file = 'ddl.txt'
 
-    async def get_pool(self, db_name: str) -> aiomysql.Pool:
-        if ',' in db_name:
-            db_names = db_name.split(',')
+    async def get_pool(self, table_name: str) -> aiomysql.Pool:
+        if '.' in table_name:
+            db_name = table_name.split('.')[0]
         else:
-            db_names = [db_name]
-        for db_name in db_names:
-            if db_name not in self.pools:
-                self.pools[db_name] = await aiomysql.create_pool(
-                host=self.config.host,
-                port=self.config.port,
-                user=self.config.user,
-                password=self.config.password,
-                db=db_name,
-                autocommit=True
-            )
+            raise ValueError(f"表名格式错误，请使用 db_name.table_name 格式")
+        if db_name not in self.pools:
+            self.pools[db_name] = await aiomysql.create_pool(
+            host=self.config.host,
+            port=self.config.port,
+            user=self.config.user,
+            password=self.config.password,
+            db=db_name,
+            autocommit=True
+        )
         return self.pools[db_name]
 
     async def close(self):
@@ -83,31 +85,74 @@ class DatabaseManager:
 
         logger.debug("已生成基础备忘录格式")
         return memo
+    
+    async def describe_table(self) -> str:
+        """获取数据表的详细表结构（DDL）信息。"""
+        columns = []
+        # 获取任意一个表的结构信息即可
+        pool = await self.get_pool(self.table_names[0])  # 使用第一个数据库
+        async with pool.acquire() as conn:
+            async with conn.cursor(aiomysql.DictCursor) as cur:
+                await cur.execute(f"SHOW CREATE TABLE {self.table_names[0]}")
+                db_columns = await cur.fetchall()
+                columns.extend(db_columns)
+        if len(self.table_names) > 1:
+            text = ",".join(self.table_names)
+            prefix = f"表 {text} 的结构信息如下（{len(self.table_names)}个表DDL是相同的）：\n"
+        else:
+            prefix = f"表 {self.table_names[0]} 的结构信息如下：\n"
+        return prefix + "".join(f"{column['Create Table']}\n" for column in columns)
+    
+    async def ddl(self) -> str:
+        """获取数据表的详细表结构（DDL）信息。"""
+        return await self.describe_table()
+    
+    def read_ddl(self) -> str:
+        """读取DDL文件内容（使用文件读取DDL，避免同步异步操作的冲突）。"""
+        with open(self.ddl_file, 'r') as f:
+            return f.read()
+
 
 class ChatInsightServer:
-    def __init__(self, mode: str, db_names: Union[str, List[str]], table_name: str, sse_path: str = "/mcp-wx-chatinsight/sse"):
-        self.mode = mode
-        self.db_names = [db_names] if isinstance(db_names, str) else db_names
-        self.table_name = table_name
+    def __init__(self, table_names: List[str], desc: str = "", sse_path: str = "/mcp-wx-chatinsight/sse"):
+        self.table_names = table_names # [db1.table,db2.table...] 格式
+        self.desc = desc
         self.db_config = DatabaseConfig()
-        self.db_manager = DatabaseManager(self.db_config)
+        self.db_manager = DatabaseManager(self.db_config,self.table_names)
+        self._tool_query_desc = self._tool_query_description()
         
         self.mcp = FastMCP(name="mcp-wx-chatinsight", sse_path=sse_path)
-        
         self._register_tools()
+    
+    def _tool_query_description(self) -> str:
+        """提供给`query`工具的描述信息"""
+        if len(self.table_names) > 1:
+            return f"""
+                这些表存储的主要数据内容是{self.desc}。
+            Args:
+                query (str): SQL SELECT 查询语句。格式要求：
+                    - 必须以 SELECT 开头，表名统一使用 db_name.table_name 格式
+                    - 支持多库多表查询：多个库表时表示数据是使用分库分表技术存储的，查询时需要合并（使用 UNION ALL 连接）数据
+                    - 数据量限制：单次查询数据量可限制为10000条，也可以要求用户分批次查询或者增加过滤条件（例如：`SELECT DISTINCT NAME FROM db1.wx_record LIMIT 10000 UNION ALL SELECT DISTINCT NAME FROM db2.wx_record LIMIT 10000;`）
+                    - 表结构信息：{self.db_manager.read_ddl()}
+            """
+        else:
+            return f"""
+                这些表存储的主要数据内容是{self.desc}。
+            Args:
+                query (str): SQL SELECT 查询语句。格式要求：
+                    - 必须以 SELECT 开头，表名统一使用 db_name.table_name 格式
+                    - 数据量限制：单次查询数据量可限制为10000条，也可以要求用户分批次查询或者增加过滤条件（例如：`SELECT DISTINCT NAME FROM db1.wx_record LIMIT 10000;`）
+                    - 表结构信息：{self.db_manager.read_ddl()}
+            """
 
     def _register_tools(self):
-
-        @self.mcp.resource(uri='memo://{path}', name='业务洞察备忘录', description='记录已发现的业务洞察的动态文档', mime_type='text/plain')
-        async def resource(path: str) -> str:
-            logger.debug(f"处理资源读取请求，URI: memo://{path}")
-            if not path or path != "memo_insights":
-                logger.error(f"未知的资源路径: {path}")
-                raise ValueError(f"未知的资源路径: {path}")
-
+        
+        @self.mcp.resource(uri='memo://business_insights', name='业务洞察备忘录', description='记录已发现的业务洞察的动态文档', mime_type='text/plain')
+        async def resource() -> str:
             return await self.db_manager._synthesize_memo()
 
-        @self.mcp.prompt(name='mcp-demo',
+        @self.mcp.prompt(name='chatinsight',
                          description='一个提示，用于初始化数据库并演示如何使用 MySQL MCP 服务器 + LLM')
         async def prompt(topic: str = Field(description="用于初始化数据库的初始数据主题",required=True)) -> types.GetPromptResult:
             logger.debug(f"处理获取提示请求，主题: {topic}")
@@ -118,76 +163,47 @@ class ChatInsightServer:
                 description=f"用于 {topic} 的示例模板",
                 messages=[
                 types.PromptMessage(role="user",content=types.TextContent(type="text", text=prompt.strip()))])
-
-        @self.mcp.tool()
-        async def read_query(query: str) -> List[Dict[str, Any]]:
-            """执行 SQL SELECT 查询并返回结果。
-
-            Args:
-                query (str): SQL SELECT 查询语句。格式要求：
-                    - 必须以 SELECT 开头
-                    - 支持多表查询：SELECT column1, column2 FROM db1.table1 WHERE condition
-                    - 支持多库查询：使用 UNION 语句合并不同数据库的结果
-
-            Returns:
-                List[Dict[str, Any]]: 查询结果列表，每个元素是一个字典，键为列名，值为对应的数据
-
-            Raises:
-                ValueError: 当查询语句不是以 SELECT 开头时抛出
-
-            Example:
-                >>> query = "SELECT id, name FROM db1.users WHERE age > 18"
-                >>> # 返回格式: [{"id": 1, "name": "张三"}, {"id": 2, "name": "李四"}]
-            """
+        
+        @self.mcp.tool(description=f"""对数据表 {",".join(self.table_names)} 执行 SQL SELECT 查询并返回结果。
+                    {self._tool_query_desc}""")
+        async def query(query: str) -> List[Dict[str, Any]]:
             if not query.strip().upper().startswith('SELECT'):
                 raise ValueError("只允许 SELECT 查询")
             
-            results = []
-            for db_name in self.db_names:
-                pool = await self.db_manager.get_pool(db_name)
+            try:
+                results = []
+                pool = await self.db_manager.get_pool(self.table_names[0])
                 async with pool.acquire() as conn:
                     async with conn.cursor(aiomysql.DictCursor) as cur:
                         await cur.execute(query)
                         db_results = await cur.fetchall()
                         results.extend(db_results)
-            return results
-
-        @self.mcp.tool()
-        async def list_tables() -> List[str]:
-            """获取所有配置的数据库中的表列表。
-
-            Returns:
-                List[str]: 表名列表，格式为 "db_name.table_name"。
-                    例如：["test1.wx_record", "test2.wx_record"]
-
-            Note:
-                - 返回的表名包含数据库名作为前缀
-                - 如果配置了多个数据库，会返回所有数据库的表
-            """
-            tables = set()
-            for db_name in self.db_names:
-                pool = await self.db_manager.get_pool(db_name)
+                return results
+            except Exception as e:
+                logger.error(f"Error executing query: {str(e)}")
+                raise
+        
+        @self.mcp.tool(description=f"""生成自定义时间范围的数据总结报告（日报、周报、月报等）。生成的SQL一般必须包含时间范围的过滤。
+                       {self._tool_query_desc}
+                       """)
+        async def report(query: str) -> str:
+            """使用GraphRAG生成数据总结报告"""
+            if not query.strip().upper().startswith('SELECT'):
+                raise ValueError("只允许 SELECT 查询")
+            
+            try:
+                results = []
+                pool = await self.db_manager.get_pool(self.table_names[0])
                 async with pool.acquire() as conn:
-                    async with conn.cursor() as cur:
-                        await cur.execute("SHOW TABLES")
-                        db_tables = await cur.fetchall()
-                        tables.update(db_name+'.'+table[0] for table in db_tables)
-            return list(tables)
-
-        @self.mcp.tool()
-        async def describe_table() -> str:
-            """获取数据表的详细表结构（DDL）信息。"""
-            columns = []
-            # 获取任意一个表的结构信息即可
-            pool = await self.db_manager.get_pool(self.db_names[0])
-            async with pool.acquire() as conn:
-                async with conn.cursor(aiomysql.DictCursor) as cur:
-                    await cur.execute(f"SHOW CREATE TABLE {self.table_name}")
-                    db_columns = await cur.fetchall()
-                    columns.extend(db_columns)
-            tables = [db_name+'.'+self.table_name for db_name in self.db_names]
-            prefix = f"表 {tables} 的结构信息如下（{len(tables)}个表DDL是相同的）：\n"
-            return prefix + "".join(f"{column['Create Table']}\n" for column in columns)
+                    async with conn.cursor(aiomysql.DictCursor) as cur:
+                        await cur.execute(query)
+                        db_results = await cur.fetchall()
+                        results.extend(db_results)
+                report = await report_generate(results,self.desc)
+                return report
+            except Exception as e:
+                logger.error(f"Error executing query: {str(e)}")
+                raise
 
         @self.mcp.tool()
         async def append_insight(insight: str) -> Dict[str, str]:
@@ -205,13 +221,6 @@ class ChatInsightServer:
 
             # 通知客户端备忘录资源已更新
             await self.mcp.get_context().session.send_resource_updated(AnyUrl("memo://insights"))
-            # notice_resource = TextResource(
-            #     uri=AnyUrl("memo://insights"),
-            #     name="Business Insights Memo",
-            #     description="A living document of discovered business insights",
-            #     mimeType="text/plain",
-            # )
-            # self.mcp.add_resource(notice_resource)
 
             return [types.TextContent(type="text", text="洞察已添加到备忘录")]
 
@@ -219,8 +228,13 @@ class ChatInsightServer:
         """启动服务器。"""
         try:
             # 初始化数据库连接
-            for db_name in self.db_names:
-                await self.db_manager.get_pool(db_name)
+            for table_name in self.table_names:
+                await self.db_manager.get_pool(table_name)
+            
+            # 写入DDL到文件
+            with open(self.db_manager.ddl_file, 'w') as f:
+                f.write(await self.db_manager.ddl())
+            logger.debug(f"DDL文件已写入 {self.db_manager.ddl_file}: {self.db_manager.read_ddl()}")
             
             # 使用指定的传输方式启动 MCP 服务器
             if transport == "sse":
@@ -231,9 +245,9 @@ class ChatInsightServer:
             # 清理数据库连接
             await self.db_manager.close()
 
-def main(mode: str, db_names: Union[str, List[str]], table_name: str, transport: str = "stdio", port: int = 8000, sse_path: str = "/mcp-wx-chatinsight/sse"):
+def main(table_names: List[str], desc: str = "", transport: str = "stdio", port: int = 8000, sse_path: str = "/mcp-wx-chatinsight/sse"):
     """服务器的主入口点。"""
-    server = ChatInsightServer(mode, db_names, table_name, sse_path)
+    server = ChatInsightServer(table_names, desc, sse_path)
     asyncio.run(server.start(transport, port))
 
 if __name__ == "__main__":
@@ -247,6 +261,5 @@ if __name__ == "__main__":
     os.environ["MYSQL_PORT"] = "3306"
     os.environ["MYSQL_USER"] = "root"
     os.environ["MYSQL_PASSWORD"] = "123456"
-    main(mode="cross_db", db_names="test1,test2", table_name="wx_record")
-
+    main(table_names=["test1.wx_record","test2.wx_record"], desc="微信群聊数据")
 
